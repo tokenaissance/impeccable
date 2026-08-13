@@ -333,8 +333,9 @@ describe('new-work-e2e: serve-question decision page', () => {
           id: 'challenger-deepsea', label: 'Deep Sea Survey', verdict: 'declined',
           case: 'Fuses poorly: buyers do not identify with abyssal instrumentation.',
           kept: 'Total environmental commitment.', hero,
-          // A stray sketch on a declined card must not re-promote it to a
-          // full media face; the renderer ignores it outright.
+          // A stray comp on a declined card must not re-promote it to a
+          // full media face; the renderer ignores it outright. Declared with
+          // the legacy `sketch` key, which doubles as alias coverage.
           sketch: '.impeccable/sketches/challenger-deepsea.webp',
         },
         { id: 'challenger-waxprint', label: 'Wax Print Market', verdict: 'competitive', hero: winnerHero },
@@ -370,7 +371,7 @@ describe('new-work-e2e: serve-question decision page', () => {
       assert.match(declinedFront, /Kept/, 'the declined front carries its kept line');
       assert.equal(declinedButton, 'Adopt anyway', 'the declined action is adopt, not build');
       assert.ok(competitiveMedia, 'a competitive challenger keeps its full media face');
-      assert.match(raise, /Raised by Deep Sea Survey/, 'the assigned card names its donor');
+      assert.match(raise, /From Deep Sea Survey/, 'the assigned card names its donor');
       assert.equal(answer.optionId, 'challenger-deepsea', 'adopting a declined card answers with its id');
     } finally {
       await stopDaemon(cwd, key);
@@ -464,6 +465,95 @@ describe('new-work-e2e: serve-question decision page', () => {
       assert.equal(secondAnswer.followup, undefined, 'the build-path round is terminal');
       assert.ok(!existsSync(path.join(cwd, '.impeccable', 'questions', `${key}.state.json`)),
         'the terminal pick removes the server state file');
+    } finally {
+      await stopDaemon(cwd, key);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('(h) the build-path toggle: a code-to-comp flip shimmers the slots, surfaces through --wait, and rides the answer', async () => {
+    const cwd = makeWorkspace();
+    const key = 'bptoggle';
+    const payload = {
+      title: 'Choose the structure',
+      buildPath: { value: 'code', toggle: true },
+      steer: true,
+      options: [
+        {
+          id: 'assigned', label: 'The Ledger Spine', kicker: 'THE ROLL',
+          comp: '.impeccable/mocks/decision/assigned.webp',
+          wireframe: { regions: [{ label: 'rail', x: 0, y: 0, w: 3, h: 10 }, { label: 'rows', x: 3, y: 0, w: 9, h: 10 }] },
+        },
+      ],
+    };
+    const { url } = await startDaemon(cwd, payload, key);
+    try {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await page.goto(url, { waitUntil: 'load' });
+      assert.equal(await page.$('.media.comp-pending'), null, 'code-led serves no shimmer');
+      assert.ok(await page.$('.media.wire'), 'code-led serves the wireframe');
+      await page.click('.bp-opt[data-bp="comp"]');
+      await page.waitForSelector('#bp-confirm:not([hidden])');
+      assert.equal(await page.$('.media.comp-pending'), null, 'nothing renders before the flip is confirmed');
+      await page.click('#bp-confirm [data-confirm]');
+      await page.waitForSelector('.media.comp-pending');
+      const flipped = await waitLoop(cwd, key, { poll: 10 });
+      assert.equal(flipped.code, 0, flipped.out);
+      assert.match(flipped.out, /BUILD PATH FLIPPED: comp/, 'the flip surfaces through --wait');
+      assert.doesNotMatch(flipped.out, /ANSWER:/, 'a flip is not an answer');
+      // The agent generates the comp; the shimmer swaps for it.
+      mkdirSync(path.join(cwd, '.impeccable', 'mocks', 'decision'), { recursive: true });
+      makeFakeImage(path.join(cwd, '.impeccable', 'mocks', 'decision'), 'ledger spine comp', 'assigned.webp');
+      await page.waitForSelector('.card[data-id="assigned"] .media img.comp:not([hidden])', { timeout: 15000 });
+      await page.click('.card[data-id="assigned"] .face.front button.choose');
+      const collected = await waitLoop(cwd, key, { poll: 10 });
+      await context.close();
+      assert.equal(collected.code, 0, collected.out);
+      const answer = JSON.parse(collected.out.match(/ANSWER: (\{.*\})/)[1]);
+      assert.equal(answer.buildPath, 'comp', 'the answer carries the flipped path');
+      assert.equal(answer.buildPathFlipped, true, 'the answer marks the flip');
+      assert.match(collected.out, /BUILD PATH: comp \(flipped/, 'the directive states session-only scope');
+    } finally {
+      await stopDaemon(cwd, key);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('(g) a wireframe card draws its schematic in the media slot and keeps its full read on the front', async () => {
+    const cwd = makeWorkspace();
+    const key = 'wire';
+    const payload = {
+      title: 'Choose the structure',
+      options: [
+        {
+          id: 'assigned', label: 'The Ledger Spine', kicker: 'THE ROLL',
+          viewport: 'An alphabetical spine with a sticky category rail.',
+          wireframe: { cols: 12, rows: 10, regions: [
+            { label: 'category rail', x: 0, y: 0, w: 3, h: 10, accent: true },
+            { label: 'ledger rows', x: 3, y: 0, w: 9, h: 10 },
+          ] },
+        },
+        { id: 'alt', label: 'The Switchboard', wireframe: { regions: [{ label: 'board', x: 0, y: 0, w: 12, h: 10 }] } },
+      ],
+      reroll: true,
+      steer: true,
+    };
+    await startDaemon(cwd, payload, key);
+    const state = JSON.parse(readFileSync(path.join(cwd, '.impeccable', 'questions', `${key}.state.json`), 'utf8'));
+    try {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await page.goto(state.url, { waitUntil: 'load' });
+      const regions = await page.$$eval('.card[data-id="assigned"] .wire-region', (els) => els.length);
+      const accent = await page.$('.card[data-id="assigned"] .wire-region.accent');
+      const back = await page.$('.card[data-id="assigned"] .face.back');
+      const front = await page.$eval('.card[data-id="assigned"] .face.front', (el) => el.textContent);
+      await context.close();
+      assert.equal(regions, 2, 'both wireframe regions render');
+      assert.ok(accent, 'the accent region carries its class');
+      assert.equal(back, null, 'a wireframe card has no back; the full read stays on the front');
+      assert.match(front, /alphabetical spine/, 'the front keeps the full read beside the schematic');
     } finally {
       await stopDaemon(cwd, key);
       rmSync(cwd, { recursive: true, force: true });
