@@ -2648,6 +2648,21 @@ describe('walkDir', () => {
     expect(walkDir('/nonexistent/path/12345')).toHaveLength(0);
   });
 
+  test('reports directory traversal errors to an optional handler', () => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-walk-error-'));
+    try {
+      const missing = path.join(parent, 'missing');
+      const errors = [];
+
+      expect(walkDir(missing, (dir, error) => {
+        errors.push({ dir, code: error.code });
+      })).toHaveLength(0);
+      expect(errors).toEqual([{ dir: missing, code: 'ENOENT' }]);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   // Issue #303: when impeccable (or any agent tool) is installed into a
   // project's .claude/.cursor/etc. tree, a root scan descended into the
   // vendored skill code and reported the detector's own example strings as
@@ -2717,23 +2732,30 @@ describe('CLI', () => {
     expect(code).toBe(0);
     expect(stdout).toContain('Usage:');
     expect(stdout).toContain('--quiet');
+    expect(stdout).toContain('Human-readable findings go to stderr');
     expect(stdout).not.toContain('--gpt');
     expect(stdout).not.toContain('--gemini');
   });
 
-  test('generated-UI tells run by default in the CLI', () => {
+  test('severity advisory is non-blocking, flagged in JSON, and suppressible', () => {
     const { stdout, code } = run('--json', path.join(FIXTURES, 'gpt-tells.html'));
-    expect(code).toBe(2);
-    const ids = JSON.parse(stdout).map(f => f.antipattern);
+    expect(code).toBe(0);
+    const findings = JSON.parse(stdout);
+    const ids = findings.map(f => f.antipattern);
     expect(ids).toContain('gpt-thin-border-wide-shadow');
     expect(ids).toContain('repeating-stripes-gradient');
     expect(ids).toContain('codex-grid-background');
     expect(ids).toContain('theater-slop-phrase');
+    expect(findings.every(f => f.severity === 'advisory' && f.advisory === true)).toBe(true);
+
+    const hidden = run('--json', '--no-advisory', path.join(FIXTURES, 'gpt-tells.html'));
+    expect(hidden.code).toBe(0);
+    expect(JSON.parse(hidden.stdout)).toEqual([]);
   });
 
   test('legacy provider flags are accepted as deprecated no-ops', () => {
     const { stdout, stderr, code } = run('--gpt', '--json', path.join(FIXTURES, 'gpt-tells.html'));
-    expect(code).toBe(2);
+    expect(code).toBe(0);
     expect(stderr).toContain('--gpt and --gemini are deprecated and ignored');
     expect(JSON.parse(stdout).some(f => f.antipattern === 'codex-grid-background')).toBe(true);
   });
@@ -2744,14 +2766,30 @@ describe('CLI', () => {
     expect(stderr).not.toContain('cannot access detect');
   });
 
+  test('keeps a local path containing spaces as one scan target', () => {
+    const fixture = writeStaticFixture({
+      'page with spaces.html': '<!doctype html><html><body><main><h1>Plain page</h1></main></body></html>',
+    });
+    const file = path.join(fixture.dir, 'page with spaces.html');
+    try {
+      const { stdout, stderr, code } = run('--json', file);
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout)).toEqual([]);
+      expect(stderr).not.toContain('cannot access');
+    } finally {
+      fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
   test('should-pass exits 0', () => {
     const { code } = run(path.join(FIXTURES, 'should-pass.html'));
     expect(code).toBe(0);
   });
 
   test('should-flag exits 2 with findings', () => {
-    const { code, stderr } = run(path.join(FIXTURES, 'should-flag.html'));
+    const { stdout, code, stderr } = run(path.join(FIXTURES, 'should-flag.html'));
     expect(code).toBe(2);
+    expect(stdout).toBe('');
     expect(stderr).toContain('side-tab');
   });
 
@@ -2899,7 +2937,7 @@ colors:
 `);
 
       const full = runIn(dir, '--json', 'index.css');
-      expect(full.code).toBe(2);
+      expect(full.code).toBe(0);
       const fullIds = JSON.parse(full.stdout).map((finding) => finding.antipattern);
       expect(fullIds).toContain('design-system-font-size');
       expect(fullIds).toContain('design-system-color');
@@ -3660,6 +3698,23 @@ describe('buildImportGraph', () => {
     for (const imp of appImports) {
       expect(imp).toContain(MF);
     }
+  });
+
+  test('reports unreadable files and continues building the graph', async () => {
+    await withStaticFixture({
+      'readable.css': '@import "./missing.css";\n',
+    }, ({ dir }) => {
+      const readable = path.join(dir, 'readable.css');
+      const missing = path.join(dir, 'missing.css');
+      const errors = [];
+      const graph = buildImportGraph([missing, readable], (file, error) => {
+        errors.push({ file, code: error.code });
+      });
+
+      expect(errors).toEqual([{ file: missing, code: 'ENOENT' }]);
+      expect(graph.get(readable)).toEqual(new Set([missing]));
+      expect(graph.has(missing)).toBe(false);
+    });
   });
 });
 
